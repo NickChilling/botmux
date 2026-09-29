@@ -140,7 +140,7 @@ describe('PUT /api/session-group-tag-config — closedName', () => {
     expect(botConfig.sessionGroup.tag.closedName).toBeUndefined();
   });
 
-  it.each([42, null, {}, []])('rejects invalid closedName without writing: %j', async closedName => {
+  it.each([42, null, {}, [[]]])('rejects invalid closedName without writing: %j', async closedName => {
     const result = await put({ name: 'Active', closedName });
     expect(result.status).toBe(400);
     expect(result.json.error).toBe('invalid_closed_name');
