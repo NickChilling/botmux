@@ -126,6 +126,7 @@ import {
   sessionConfiguredRuntimeDisplayName,
 } from './cli-runtime-display.js';
 import { isSessionGroup } from '../services/session-groups-store.js';
+import { tagClosedSessionGroup } from '../services/feed-group-tagger.js';
 import { resumeStartsFresh } from '../services/resume-fresh-policy.js';
 import { retryCooldownRemaining, markRetryAttempt } from '../services/failed-turn-retry.js';
 import { readGroupCollaborationMode, writeGroupCollaborationMode } from '../services/group-collaboration-mode-store.js';
@@ -2389,6 +2390,15 @@ export async function handleCommand(
             );
             break;
           }
+          // Run only after a clean explicit close, never on crash/restart/refusal.
+          // The already-closed session and its receipt do not wait for OAuth/IM.
+          void tagClosedSessionGroup(closed.current.larkAppId, closed.current.chatId, targetSessionId)
+            .then(async result => {
+              if (result.status === 'skipped') return;
+              await sessionReply(rootId, result.status === 'updated'
+                ? t('cmd.close.tag_updated', { name: result.name }, loc)
+                : t('cmd.close.tag_failed', undefined, loc));
+            }).catch(err => logger.warn(`[${logTag}] close tag notification failed: ${err}`));
           // 「会话已关闭」卡片优先「仅自己可见」：普通群顶层走 ephemeral 只发给
           // 执行 /close 的本人；若本命令从折叠到 chat-scope 的真实话题触发，则
           // invocationReplyTarget 让 helper 跳过无 thread 锚点的 ephemeral，回原话题。

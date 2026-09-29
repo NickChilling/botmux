@@ -318,6 +318,8 @@ export const messages: Record<string, string> = {
 
   // ─── Command responses ───────────────────────────────────────────────────
   'cmd.no_active_session': '当前话题没有活跃的会话。',
+  'cmd.close.tag_updated': '🏷️ 当前群已移入「{name}」。',
+  'cmd.close.tag_failed': '⚠️ 会话已关闭，但标签切换未完成；群聊与历史保留，请检查标签授权或手动调整分组。',
   'cmd.close.refused': '⚠️ 会话关闭失败：远端会话未能确认取消，已保留 active 记录以便重试（{error}）。远端会话可能仍在运行，请稍后重试 /close。',
   'cmd.close.refused_with_task': '⚠️ 会话关闭失败：远端会话未能确认取消，已保留 active 记录以便重试（{error}）。远端会话 id：`{taskId}`。远端会话可能仍在运行，请稍后重试 /close。',
   'cmd.insight.operator_only': '⚠️ 仅授权用户（allowedUsers）可以使用 /insight。',

@@ -36,3 +36,27 @@ If you'd rather not use commands, the **Groups** panel in `botmux dashboard` can
 
 ![Create Group in Dashboard](https://magic-builder.tos-cn-beijing.volces.com/uploads/1780033300986_dash-newgroup.png)
 <p class="cap">"New Group": fill in the group name, bind a directory, and check the bots to pull into the group</p>
+
+## DM-created session groups: change the tag on close
+
+With `p2pMode: "group"`, set **Tag after closing** under Dashboard **Bot configuration → Session-group tag**, for example “Closed”. Leave it empty to retain the current behavior. The equivalent per-bot `bots.json` configuration is:
+
+```json
+{
+  "p2pMode": "group",
+  "sessionGroup": {
+    "tag": {
+      "mode": "feed-group",
+      "name": "Active",
+      "closedName": "Closed"
+    }
+  }
+}
+```
+
+After a clean `/close` (including the close-card action that uses this command), the chat is added to the configured destination and then removed from its original automatic group. The destination is reused or created by name. Neither group itself, other chats, nor chat history are deleted. Names are trimmed and limited to 60 Unicode codepoints.
+
+- Supports personal `feed-group` mode only, using the **user who created the session group** and their existing tag authorization. Use `/login tags` if authorization is missing.
+- Failed closes, unclean residuals, `/stop`, crashes, background cleanup, and ordinary groups/topics do not move tags.
+- Migration runs in the background with a separate failure notification. Failed adds keep the original association; identical source and destination IDs are never removed.
+- Resuming does not move the chat back. Clearing `closedName` disables this behavior without bulk-migrating existing chats.

@@ -8,6 +8,11 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+vi.mock('../src/services/feed-group-tagger.js', () => ({
+  tagClosedSessionGroup: vi.fn(async () => ({ status: 'skipped' })),
+}));
+import { tagClosedSessionGroup } from '../src/services/feed-group-tagger.js';
+
 // ─── Mock external modules ──────────────────────────────────────────────────
 
 // Command routing must not load or start a native terminal through transitive imports.
@@ -1756,6 +1761,7 @@ describe('parseTopicHeader（取代 parseForceTopicInvocation 的路由元命令
 describe('handleCommand', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(tagClosedSessionGroup).mockResolvedValue({ status: 'skipped' });
     vi.mocked(closeSession).mockImplementation(async (sessionId: string) => {
       // Model the authoritative close lifecycle's dashboard contract. The
       // command must delegate this side effect instead of publishing a second
@@ -2671,6 +2677,33 @@ describe('handleCommand', () => {
   });
 
   describe('/close', () => {
+    it('updates the group tag only after clean close and does not wait to deliver the close card', async () => {
+      const ds = makeDaemonSession();
+      const deps = makeDeps(ds);
+      let release!: (value: Awaited<ReturnType<typeof tagClosedSessionGroup>>) => void;
+      vi.mocked(tagClosedSessionGroup).mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+      await handleCommand('/close', ROOT_ID, makeLarkMessage('/close'), deps, LARK_APP_ID);
+      expect(tagClosedSessionGroup).toHaveBeenCalledWith(LARK_APP_ID, CHAT_ID, ds.session.sessionId);
+      expect(vi.mocked(closeSession).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(tagClosedSessionGroup).mock.invocationCallOrder[0]);
+      expect(deliverEphemeralOrReply).toHaveBeenCalled();
+      release({ status: 'failed' });
+      await vi.waitFor(() => expect(vi.mocked(deps.sessionReply).mock.calls.some(call =>
+        typeof call[1] === 'string' && call[1].includes('标签切换未完成'))).toBe(true));
+      expect(deps.activeSessions.size).toBe(0);
+    });
+
+    it('does not migrate tags when close fails or leaves a residual', async () => {
+      vi.mocked(closeSession).mockResolvedValueOnce({ ok: false, error: 'unproven' } as never);
+      await handleCommand('/close', ROOT_ID, makeLarkMessage('/close'), makeDeps(makeDaemonSession()), LARK_APP_ID);
+      expect(tagClosedSessionGroup).not.toHaveBeenCalled();
+      vi.mocked(closeSession).mockResolvedValueOnce({
+        ok: true, outcome: 'closed_with_residual', alreadyClosed: false, known: true,
+        residual: { reason: 'local_subtree_boundary_unproven' },
+      } as never);
+      await handleCommand('/close', ROOT_ID, makeLarkMessage('/close'), makeDeps(makeDaemonSession()), LARK_APP_ID);
+      expect(tagClosedSessionGroup).not.toHaveBeenCalled();
+    });
+
     it('treats an existing App Server adopt as a BotMux-only disconnect', async () => {
       const ds = makeDaemonSession({
         session: makeSession({

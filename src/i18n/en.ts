@@ -319,6 +319,8 @@ export const messages: Record<string, string> = {
 
   // ─── Command responses ───────────────────────────────────────────────────
   'cmd.no_active_session': 'No active session in this topic.',
+  'cmd.close.tag_updated': '🏷️ This chat is now in “{name}”.',
+  'cmd.close.tag_failed': '⚠️ The session is closed, but its tag update did not complete. The chat and history are kept; check tag authorization or adjust the groups manually.',
   'cmd.close.refused': '⚠️ Could not close the session because remote cancellation was not proven ({error}). The active record was kept for retry; the remote session may still be running. Retry /close later.',
   'cmd.close.refused_with_task': '⚠️ Could not close the session because remote cancellation was not proven ({error}). The active record was kept for retry. Remote session id: `{taskId}`. The remote session may still be running; retry /close later.',
   'cmd.insight.operator_only': '⚠️ Only authorized users (allowedUsers) can use /insight.',
