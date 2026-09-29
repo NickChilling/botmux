@@ -127,6 +127,7 @@ import {
 } from './cli-runtime-display.js';
 import { isSessionGroup } from '../services/session-groups-store.js';
 import { tagClosedSessionGroup } from '../services/feed-group-tagger.js';
+import { dismissSessionGroup } from './dismiss-command.js';
 import { resumeStartsFresh } from '../services/resume-fresh-policy.js';
 import { retryCooldownRemaining, markRetryAttempt } from '../services/failed-turn-retry.js';
 import { readGroupCollaborationMode, writeGroupCollaborationMode } from '../services/group-collaboration-mode-store.js';
@@ -156,7 +157,7 @@ export { DAEMON_COMMANDS, PASSTHROUGH_COMMANDS };
  * card buttons routable, but for these that record is a phantom conversation
  * that pollutes the dashboard's session list. Handle them without a session.
  */
-export const SESSIONLESS_DAEMON_COMMANDS = new Set(['/group', '/g', '/project', '/list-slash-command', '/slash', '/botconfig', '/dashboard', '/sessions', '/skills', '/vc-auth', '/watch-comment', '/issue', '/cleanup-wt']);
+export const SESSIONLESS_DAEMON_COMMANDS = new Set(['/group', '/g', '/project', '/list-slash-command', '/slash', '/botconfig', '/dashboard', '/sessions', '/skills', '/vc-auth', '/watch-comment', '/issue', '/cleanup-wt', '/dismiss']);
 
 const SLASH_GROUP_NAME_MAX_UTF16_LENGTH = 50;
 
@@ -2174,6 +2175,36 @@ export async function handleCommand(
           await sessionReply(rootId, '⚠️ lane 会话未能安全关闭，持久化路由与 worktree 均已保留。');
         } else {
           await sessionReply(rootId, `⚠️ lane 状态发生变化，未完成关闭（${laneCloseResult.status}）。请重新发送 \`/lane close\`。`);
+        }
+        break;
+      }
+
+      case '/dismiss': {
+        const appId = larkAppId ?? ds?.larkAppId;
+        const chatId = message.chatId ?? ds?.chatId;
+        if (!appId || !chatId || message.senderType !== 'user' || !message.senderId
+          || !canOperate(appId, chatId, message.senderId, message.senderUnionId)) {
+          await sessionReply(rootId, t('cmd.dismiss.owner_only', undefined, loc));
+          break;
+        }
+        const parsed = /^\/dismiss(?:\s+--confirm=([a-f0-9]{64}))?\s*$/i.exec(message.content.trim());
+        if (!parsed) {
+          await sessionReply(rootId, t('cmd.dismiss.usage', undefined, loc));
+          break;
+        }
+        const result = await dismissSessionGroup({
+          larkAppId: appId, chatId, rootId, senderId: message.senderId,
+          confirmedState: parsed[1], activeSessions,
+        });
+        if (result.status === 'dismissed') {
+          // The deleted group cannot receive the receipt; notify privately.
+          try { await sendUserMessage(appId, message.senderId, t('cmd.dismiss.dismissed', undefined, loc)); }
+          catch (err) { logger.warn(`[dismiss] private receipt failed: ${err}`); }
+        } else {
+          const reply = result.status === 'confirm'
+            ? t('cmd.dismiss.confirm', { command: `/dismiss --confirm=${result.state}` }, loc)
+            : t(`cmd.dismiss.${result.status}`, undefined, loc);
+          await sessionReply(rootId, reply + ('detail' in result && result.detail ? `\n${result.detail}` : ''));
         }
         break;
       }
@@ -5798,6 +5829,7 @@ export async function handleCommand(
         const help = [
           t('help.heading_session', undefined, loc),
           t('help.close', { cliName }, loc),
+          t('help.dismiss', undefined, loc),
           t('help.cleanup_wt', undefined, loc),
           t('help.lane', undefined, loc),
           t('help.stop', { cliName }, loc),

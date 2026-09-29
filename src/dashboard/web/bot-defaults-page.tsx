@@ -5270,7 +5270,12 @@ function SessionModeSection(props: {
         onChange={next => void saveP2p(next)}
       >
         <div className="bd-mode-group-side"><StatusSpan status={p2pStatus} attr={{ 'data-p2p-status': '' }} /></div>
-        {p2p === 'group' ? <SessionGroupTagRow bot={props.bot} /> : null}
+        {p2p === 'group' ? (
+          <>
+            <SessionGroupTagRow bot={props.bot} />
+            <p className="bd-section-note" data-session-group-lifecycle>{tr('botDefaults.sgLifecycleHint')}</p>
+          </>
+        ) : null}
       </ModeOptionGroup>
 
       <ModeOptionGroup

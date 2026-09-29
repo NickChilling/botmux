@@ -7694,6 +7694,21 @@ export function findActiveChatScopeSessionsByChat(chatId: string): Session[] {
   );
 }
 
+/** Fail-closed cross-bot inventory before deleting a chat, including its topics. */
+export function findActiveSessionsByChatStrict(chatId: string): Session[] {
+  load();
+  if (loadFailure) throw new SessionStoreUnavailableError(loadFailure);
+  const matches = [...sessions.values()].filter(s => s.chatId === chatId && s.status === 'active');
+  for (const ref of listStoreRefs(config.session.dataDir, { strict: true })) {
+    if (ref.appId === currentAppId) continue;
+    for (const session of readStoreActiveRows(ref, undefined, { strict: true })) {
+      // The store filename owns legacy rows that predate larkAppId persistence.
+      if (session.chatId === chatId) matches.push({ ...session, larkAppId: ref.appId ?? session.larkAppId });
+    }
+  }
+  return matches;
+}
+
 export function findActiveSessionsByWorkingDir(workingDir: string): Session[] {
   return findActiveSessionsMatching(s => s.workingDir === workingDir);
 }

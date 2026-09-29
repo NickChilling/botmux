@@ -13,6 +13,10 @@ vi.mock('../src/services/feed-group-tagger.js', () => ({
 }));
 import { tagClosedSessionGroup } from '../src/services/feed-group-tagger.js';
 
+
+vi.mock('../src/core/dismiss-command.js', () => ({ dismissSessionGroup: vi.fn(async () => ({ status: 'confirm', state: 'a'.repeat(64) })) }));
+import { dismissSessionGroup } from '../src/core/dismiss-command.js';
+
 // ─── Mock external modules ──────────────────────────────────────────────────
 
 // Command routing must not load or start a native terminal through transitive imports.
@@ -292,6 +296,7 @@ vi.mock('../src/im/lark/client.js', () => ({
   },
   deleteMessage: vi.fn(async () => true),
   sendMessage: vi.fn(async () => 'card-msg-id'),
+  sendUserMessage: vi.fn(async () => 'private-msg-id'),
   uploadImage: vi.fn(async () => 'img_uploaded'),
   // /relay picker replies land anchored at the invocation message / 话题 via
   // replyMessage (reply-at-invocation), not sessionReply. Args mirror the
@@ -608,7 +613,7 @@ import { getSessionWorkingDir, buildNewTopicPrompt, buildNewTopicCliInput, ensur
 import * as sessionStore from '../src/services/session-store.js';
 import * as scheduleStore from '../src/services/schedule-store.js';
 import * as scheduler from '../src/core/scheduler.js';
-import { deleteMessage, sendMessage, replyMessage, listChatBotMembers, getChatModeStrict, getMessageThreadId, UserTokenMissingError } from '../src/im/lark/client.js';
+import { deleteMessage, sendMessage, sendUserMessage, replyMessage, listChatBotMembers, getChatModeStrict, getMessageThreadId, UserTokenMissingError } from '../src/im/lark/client.js';
 import { buildAdoptSelectCard, buildSlashListCard, buildSessionClosedCard } from '../src/im/lark/card-builder.js';
 import { createGroupWithBots } from '../src/services/group-creator.js';
 import { getAllBots, getBot, findOncallChat, effectiveDefaultWorkingDir } from '../src/bot-registry.js';
@@ -775,7 +780,7 @@ function mockCodexAppBot(): void {
 
 describe('DAEMON_COMMANDS set', () => {
   it('should contain all expected commands', () => {
-    const expected = ['/close', '/cleanup-wt', '/lane', '/stop', '/restart', '/status', '/retry', '/help', '/cd', '/repo', '/rename', '/schedule', '/role', '/botconfig', '/skills', '/pair', '/login', '/adopt', '/detach', '/disconnect', '/oncall', '/project', '/group', '/g', '/relay', '/quote', '/fork', '/forklist', '/card', '/cot', '/term', '/list-slash-command', '/slash', '/subscribe-lark-doc', '/watch-comment', '/vc', '/insight', '/dashboard', '/sessions', '/vc-auth', '/issue', '/cli'];
+    const expected = ['/dismiss', '/close', '/cleanup-wt', '/lane', '/stop', '/restart', '/status', '/retry', '/help', '/cd', '/repo', '/rename', '/schedule', '/role', '/botconfig', '/skills', '/pair', '/login', '/adopt', '/detach', '/disconnect', '/oncall', '/project', '/group', '/g', '/relay', '/quote', '/fork', '/forklist', '/card', '/cot', '/term', '/list-slash-command', '/slash', '/subscribe-lark-doc', '/watch-comment', '/vc', '/insight', '/dashboard', '/sessions', '/vc-auth', '/issue', '/cli'];
     for (const cmd of expected) {
       expect(DAEMON_COMMANDS.has(cmd), `Expected DAEMON_COMMANDS to contain ${cmd}`).toBe(true);
     }
@@ -812,7 +817,7 @@ describe('DAEMON_COMMANDS set', () => {
     // bot 发送方和 `/t /tabs ...` 会建出 phantom session 后静默失效。
     // /fork 与 /issue 仍是一等 daemon 命令；/subscribe-lark-doc 保持原本的
     // 按文件 API 订阅命令语义，不做别名。
-    expect(DAEMON_COMMANDS.size).toBe(42);
+    expect(DAEMON_COMMANDS.size).toBe(43);
     expect(DAEMON_COMMANDS.has('/tabs')).toBe(false);
     expect(DAEMON_COMMANDS.has('/tab')).toBe(false);
   });
@@ -1762,6 +1767,7 @@ describe('handleCommand', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(tagClosedSessionGroup).mockResolvedValue({ status: 'skipped' });
+    vi.mocked(dismissSessionGroup).mockResolvedValue({ status: 'confirm', state: 'a'.repeat(64) });
     vi.mocked(closeSession).mockImplementation(async (sessionId: string) => {
       // Model the authoritative close lifecycle's dashboard contract. The
       // command must delegate this side effect instead of publishing a second
@@ -2673,6 +2679,41 @@ describe('handleCommand', () => {
       expect(removeRepoWorktree).not.toHaveBeenCalled();
       expect(vi.mocked(deps.sessionReply).mock.calls[0]?.[1]).toContain('关闭期间');
       expect(vi.mocked(deps.sessionReply).mock.calls[0]?.[1]).toContain('路由与 worktree 均已保留');
+    });
+  });
+
+  describe('/dismiss', () => {
+    it('registers as sessionless and routes confirmation without spawning a session', async () => {
+      const deps = makeDeps();
+      expect(SESSIONLESS_DAEMON_COMMANDS.has('/dismiss')).toBe(true);
+      await handleCommand('/dismiss', CHAT_ID, makeLarkMessage('/dismiss', { chatId: CHAT_ID }), deps, LARK_APP_ID);
+      expect(dismissSessionGroup).toHaveBeenCalledWith(expect.objectContaining({ chatId: CHAT_ID, rootId: CHAT_ID, confirmedState: undefined }));
+      expect(deps.sessionReply).toHaveBeenCalledWith(CHAT_ID, expect.stringContaining('/dismiss --confirm='), undefined, LARK_APP_ID, 'msg_001');
+      expect(tagClosedSessionGroup).not.toHaveBeenCalled();
+    });
+    it('rejects bot callers and non-operators before destructive handling', async () => {
+      await handleCommand('/dismiss', CHAT_ID, makeLarkMessage('/dismiss', { chatId: CHAT_ID, senderType: 'app' }), makeDeps(), LARK_APP_ID);
+      vi.mocked(canOperate).mockReturnValueOnce(false);
+      await handleCommand('/dismiss', CHAT_ID, makeLarkMessage('/dismiss', { chatId: CHAT_ID }), makeDeps(), LARK_APP_ID);
+      expect(dismissSessionGroup).not.toHaveBeenCalled();
+    });
+    it('reports successful deletion privately rather than to the deleted group', async () => {
+      vi.mocked(dismissSessionGroup).mockResolvedValue({ status: 'dismissed' });
+      const deps = makeDeps();
+      await handleCommand('/dismiss', CHAT_ID, makeLarkMessage('/dismiss --confirm=' + 'a'.repeat(64), { chatId: CHAT_ID }), deps, LARK_APP_ID);
+      expect(sendUserMessage).toHaveBeenCalledWith(LARK_APP_ID, 'ou_sender', expect.stringContaining('已解散'));
+      expect(deps.sessionReply).not.toHaveBeenCalled();
+    });
+    it('rejects unsupported arguments without executing', async () => {
+      await handleCommand('/dismiss', CHAT_ID, makeLarkMessage('/dismiss --yes', { chatId: CHAT_ID }), makeDeps(), LARK_APP_ID);
+      expect(dismissSessionGroup).not.toHaveBeenCalled();
+    });
+    it('surfaces residual details without reporting deletion success', async () => {
+      vi.mocked(dismissSessionGroup).mockResolvedValue({ status: 'residual', detail: 'remote-survivor' });
+      const deps = makeDeps();
+      await handleCommand('/dismiss', CHAT_ID, makeLarkMessage('/dismiss', { chatId: CHAT_ID }), deps, LARK_APP_ID);
+      expect(deps.sessionReply).toHaveBeenCalledWith(CHAT_ID, expect.stringContaining('remote-survivor'), undefined, LARK_APP_ID, 'msg_001');
+      expect(sendUserMessage).not.toHaveBeenCalled();
     });
   });
 
