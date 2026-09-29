@@ -123,3 +123,13 @@ flowchart LR
 - 修复后：标签迁移/默认名称/自愈、Dashboard 标签与 owner、会话群存储共 6 文件 109 项通过；命令处理、关闭消费者、解散命令共 3 文件 426 项通过，合计 **9 文件 535 项通过**。
 - `npm exec --yes --package=bun@1.4.2 -- bun run build` 通过（含 TypeScript、脚本与 mock 类型检查、Dashboard 打包及资源审计）；`git diff --check` 通过。
 - 真实 API 仅验证过只读查询；完整标签迁移与真实解散仍未执行。
+
+## 重新提交 PR：对齐最新 master
+
+重新提交时同步 master 的跨进程 SQLite-only 会话库协议。解散群组前的跨 Bot 检查复用当前存储读取接口；仍有已知 Bot 未完成迁移、Bot 清单无法确认或活跃行损坏时，拒绝解散。测试保留迁移后旧行缺失 `larkAppId` 的归属检查，并增加未迁移/未知清单的拒绝路径；不恢复跨进程解析旧 JSON 的行为。
+
+本机已运行分页修复提交 `dba1a20`，Bot 与 Dashboard 重启后在线；本次同步 master 的 PR 分支独立验证，不将其它上游改动自动部署到本机。PR 描述区分构建/回归、隔离界面预览与真实飞书写操作的验证边界。
+
+- 最终合并态：上述 29 文件，加 `dashboard-feed-groups`、`dashboard-feed-group-owner.integration`、`session-store-sqlite`、`session-store-copy`、`known-bot-app-ids`、`mojo-isolation-inventory-failclosed`，共 **35 文件、1069 项通过，1 条已有 Linux boot-id 条件用例在 macOS 跳过**。
+- 合并态完整构建通过，包括 TypeScript、脚本/mock 类型检查、Dashboard 打包和资源审计；`git diff --check` 通过。
+- 测试先复现了新存储协议下漏检未迁移 Bot 的问题，再验证严格拒绝；SQLite 内损坏活跃行与旧行归属回归均通过。
