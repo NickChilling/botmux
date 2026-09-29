@@ -4,7 +4,7 @@
 
 ```mermaid
 flowchart LR
-  A[/close] --> B{正常关闭成功?}
+  A["/close"] --> B{正常关闭成功?}
   B -->|否| C[保留原分组]
   B -->|是| D{会话群且配置 closedName?}
   D -->|是| E[等待建群打标完成]
