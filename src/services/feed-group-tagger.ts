@@ -515,14 +515,22 @@ async function findFeedGroupByName(brandHost: string, userToken: string, name: s
   let pageToken = '';
   for (let page = 0; page < 3; page++) {
     try {
-      const qs = new URLSearchParams({ page_size: '50', ...(pageToken ? { page_token: pageToken } : {}) });
+      // Feishu requires page_token even for the first page; omission returns 9499.
+      const qs = new URLSearchParams({ page_size: '50', page_token: pageToken });
       const res = await fetch(`${brandHost}/open-apis/im/v1/groups?${qs}`, {
         signal,
         headers: { Authorization: `Bearer ${userToken}` },
       });
       const json: any = await res.json().catch(() => ({}));
       if (!res.ok || json.code !== 0 || (strict && !Array.isArray(json.data?.groups))) {
-        if (strict) throw new Error(`feed group lookup failed: code=${json.code}`);
+        if (strict) {
+          // Keep diagnostic fields only, never request headers or token-bearing URLs.
+          const message = typeof json.msg === 'string' && json.msg
+            ? json.msg.replace(/[\r\n]/g, ' ').slice(0, 500) : 'invalid response';
+          const logId = typeof json.error?.log_id === 'string'
+            ? json.error.log_id.replace(/[\r\n]/g, ' ').slice(0, 128) : 'unknown';
+          throw new Error(`feed group lookup failed: status=${res.status} code=${json.code} msg=${message} log_id=${logId}`);
+        }
         return null;
       }
       const hit = (json.data?.groups ?? []).find((g: any) => g?.name === name && g?.group_id);
