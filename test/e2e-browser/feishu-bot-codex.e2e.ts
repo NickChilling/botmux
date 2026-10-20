@@ -19,6 +19,7 @@ import {
   waitForCodexSideResponse,
   closeSession,
 } from './helpers.js';
+import { publishLabeledPageVideo } from './e2e-video.js';
 
 export function registerMidsceneSuites(): void {
   createBotTest('Codex', { allowCodexUsageLimitResponse: true });
@@ -48,6 +49,11 @@ export function registerMidsceneSuites(): void {
       await closeSession(agent, page);
       await agent?.destroy();
       await context?.close();
+      try {
+        await publishLabeledPageVideo(page);
+      } catch (error) {
+        console.error('Feishu video publish failed:', error);
+      }
       await browser?.close();
     });
 
@@ -56,9 +62,9 @@ export function registerMidsceneSuites(): void {
       // Plain tag — this test supplies its own marker instruction.
       const msg = `${testMessage('codex-marker', { plain: true })} 请在最终回复中原样包含 ${marker}`;
 
-      await sendMessage(agent, msg);
+      await sendMessage(agent, msg, page);
       await openThreadForMessage(agent, { timeoutMs: 120_000, msgHint: msg, page });
-      await clickDirectStartIfPresent(agent, page);
+      await clickDirectStartIfPresent(agent, page, { expectMs: 90_000 });
 
       await scrollThreadToBottom(agent);
       await waitForCodexSideResponse(agent, { marker, timeoutMs: 180_000 });

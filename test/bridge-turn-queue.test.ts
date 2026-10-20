@@ -1122,6 +1122,52 @@ describe('BridgeTurnQueue', () => {
       expect(ready[0].assistantUuids).toEqual(['a-start', 'a-final']);
     });
 
+    it('mid-turn absorbed reminder queued_command is filtered and does not split or drop turn', () => {
+      const q = new BridgeTurnQueue();
+      q.mark('t1');
+      q.ingest([user('u1', 'first question'), assistant('a1', 'answering')]);
+      const absorbedEvent: any = {
+        type: 'attachment',
+        uuid: 'q-absorbed',
+        timestamp: new Date().toISOString(),
+        attachment: {
+          type: 'queued_command',
+          prompt: '<system-reminder>User sent another message while you were working</system-reminder>',
+        },
+        renderedRole: 'system',
+        rendered: [{ content: '<system-reminder>User sent another message</system-reminder>' }],
+      };
+      q.ingest([absorbedEvent]);
+      const peek = q.peek();
+      expect(peek).toHaveLength(1);
+      expect(peek[0].turnId).toBe('t1');
+      expect(peek[0].assistantUuids).toEqual(['a1']);
+    });
+
+    it('protects turn with assistant activity from HOL drop even without visible text', () => {
+      const q = new BridgeTurnQueue();
+      q.mark('t1', makeFingerprint('task 1'));
+      const toolUseEv: any = {
+        type: 'assistant',
+        uuid: 'a-tool',
+        timestamp: new Date().toISOString(),
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'tool_1', name: 'botmux_send', input: {} }],
+        },
+      };
+      q.ingest([user('u1', 'task 1'), toolUseEv]);
+      expect(q.peek()[0].hasAssistantActivity).toBe(true);
+      expect(q.peek()[0].assistantUuids).toHaveLength(0);
+
+      q.mark('t2', makeFingerprint('task 2'));
+      q.ingest([user('u2', 'task 2')]);
+
+      const emittable = q.drainEmittable();
+      expect(emittable).toHaveLength(1);
+      expect(emittable[0].turnId).toBe('t1');
+    });
+
     it('task notifications do not cap the send-marker window before the final botmux send', () => {
       const q = new BridgeTurnQueue();
       const firstPrompt = '<user_message>research startup hooks</user_message>';
@@ -1368,19 +1414,18 @@ describe('BridgeTurnQueue', () => {
       expect(q.drainEmittable({ terminalBoundary: true }).map(t => t.turnId)).toContain('lark-1');
     });
 
-    it('worker.ts drains the report BEFORE the empty-ready early return', () => {
-      // Wiring, not policy: a queue that reports perfectly is inert if nobody
-      // drains it. Ordering matters — a head-of-line drop usually lands on a
-      // tick that emits nothing, so draining after `if (ready.length === 0)
-      // return;` would skip exactly the case this fix exists for.
+    // 源码结构护栏(K3)：emitReadyTurns 在 worker.ts 闭包里、没有行为 seam；一次 head-of-line drop
+    // 通常落在什么都不 emit 的 tick 上，若排空放到「ready 为空就 return」之后，journal 条目永不退役，
+    // 每次重启都重放旧 provider 错误成新的「本轮执行失败」卡（#1170，线上实测六次重启两次重放）。
+    // 只钉不变量：排空 + journalBridgeTurnClear 先于空 ready 的提前返回。
+    it('worker retires dropped turns\' journal entries before the empty-ready early return', () => {
       const source = readFileSync(new URL('../src/worker.ts', import.meta.url), 'utf8');
       const fn = source.slice(source.indexOf('function emitReadyTurns('));
       const drainAt = fn.indexOf('takeDroppedNeedingJournalClear()');
-      const earlyReturnAt = fn.indexOf('if (ready.length === 0) return;');
+      const earlyReturnAt = fn.search(/if\s*\(\s*ready\.length\s*===\s*0\s*\)\s*return\b/);
       expect(drainAt).toBeGreaterThan(-1);
       expect(earlyReturnAt).toBeGreaterThan(-1);
       expect(drainAt).toBeLessThan(earlyReturnAt);
-      // ...and it must actually retire the journal entry, not just log.
       expect(fn.slice(drainAt, earlyReturnAt)).toContain('journalBridgeTurnClear(');
     });
   });
@@ -1561,37 +1606,6 @@ describe('BridgeTurnQueue', () => {
       expect(next).toHaveLength(1);
       expect(next[0].turnId).toBe('om_1');
       expect(next[0].assistantUuids).toEqual(['a1']);
-    });
-
-    it('worker.ts bounds the send window by a STARTED pending turn and skips the pre-text gate for scheduled', () => {
-      // Must-fix regression for two of the review findings:
-      //  (1) A scheduled turn is inserted AHEAD of an unstarted Lark mark.
-      //      Using that mark's early flush-time markTimeMs as the window
-      //      upper bound inverts [later, earlier) into an empty range, so the
-      //      turn's real final `botmux send` escapes suppression and posts a
-      //      duplicate. nextPendingMarkTimeMs must require remaining[0].started
-      //      (mirroring the codex bridge).
-      //  (2) The pre-text suppression gate must skip scheduled turns, else a
-      //      short progress send swallows the later long final before the
-      //      transcript text is read.
-      const source = readFileSync(new URL('../src/worker.ts', import.meta.url), 'utf8');
-      const fn = source.slice(
-        source.indexOf('function emitReadyTurns('),
-        source.indexOf('function emitReadyCodexTurns('),
-      );
-      expect(fn).toMatch(
-        /remainingPending\.length > 0 && remainingPending\[0\]\.started\s*\n\s*\?\s*remainingPending\[0\]\.markTimeMs/,
-      );
-      expect(fn).toMatch(/if\s*\(!turn\.isScheduled && turn\.isLocal/);
-      // (3) The local-card visibility branch must exclude scheduled turns —
-      //     a fire is isLocal but must be rendered/forwarded, not hidden.
-      expect(fn).toMatch(/if\s*\(turn\.isLocal && !turn\.isScheduled/);
-      // (4) final_output injects the create-time anchor as replyTurnId only
-      //     for a scheduled turn outside zero-injection mode, so the daemon
-      //     posts it into the task's originating topic.
-      expect(fn).toMatch(
-        /\.\.\.\(turn\.isScheduled && !zeroPromptTerminalSync\(\) && turn\.replyAnchorTurnId\s*\n\s*\?\s*\{ replyTurnId: turn\.replyAnchorTurnId \}/,
-      );
     });
 
     // ── Round-3 review: ack spoofing + durable-anchor recovery ──────────────

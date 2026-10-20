@@ -19,6 +19,8 @@
  * the outer block (CommonMark spec).
  */
 
+import { resolveReplyFooterPolicy } from '../../services/reply-footer.js';
+import type { ReplyCardPresentation } from '../../services/reply-card-render.js';
 import { homedir } from 'node:os';
 import { existsSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -34,8 +36,11 @@ import {
   replyCardHeadingElementId,
 } from './reply-card-footer-signature.js';
 import { buildFeedbackElement } from './skill-feedback-card.js';
+import { buildCompletionProposalElement } from './completion-proposal-card.js';
+import { composeFinalCardSections } from './final-card-sections.js';
 import type { FeedbackPolicy } from '../../services/feedback-policy.js';
 import type { StatuslineQuota } from '../../services/statusline-snapshot.js';
+import type { CompletionProposalRecord } from '../../core/completion-proposal.js';
 import type { ReplyCardHeader } from './reply-card-style.js';
 import { TABLE_AUTO_ROW_STYLE } from './table-style.js';
 import {
@@ -48,6 +53,10 @@ import {
 } from './vega-lite-chart.js';
 import { TURN_REPLY_CARD_MAX_BYTES, turnReplyCardRequestBytes } from './turn-reply-card-size.js';
 import { logger } from '../../utils/logger.js';
+import {
+  cardMarkdownImageReferences,
+  FEISHU_IMG_KEY,
+} from './card-markdown-image-references.js';
 
 /** Room kept for chrome that callers attach *after* a card is built and
  * fitted — today the on-call group button (≈483B of request body), added by
@@ -151,9 +160,9 @@ export interface CardUsageSnapshot {
     in: number;
     out: number;
   } | null;
-  /** Latest executor-reported model. Rendered by session-status cards only. */
+  /** Observed runtime model, or the configured launch model when unavailable. */
   model?: string;
-  /** Latest executor-reported reasoning effort. */
+  /** Observed reasoning effort, or the configured session effort when unavailable. */
   reasoningEffort?: string;
   /** Session-only configuration; separate from the last executor-reported effort. */
   reasoningControl?: {
@@ -380,12 +389,12 @@ export function normalizeLocalHomeLinks(
 }
 
 /** Default footer brand when a bot has no custom `brandLabel` configured. */
-export const DEFAULT_BRAND_LABEL = 'Powered by [botmux](https://github.com/deepcoldy/botmux) with :LOVE:';
+export const DEFAULT_BRAND_LABEL = '[botmux](https://github.com/deepcoldy/botmux)';
 
 /**
  * Resolve the brand segment to render in a card footer from a bot's configured
  * `brandLabel` (see {@link resolveBrandLabel}):
- *   • `undefined` (unset)  → `Powered by [botmux](...) with :LOVE:`
+ *   • `undefined` (unset)  → the default botmux link
  *   • `''` / whitespace    → `null` (brand suppressed)
  *   • any other string     → one trimmed line (markdown allowed)
  * Returning `null` lets callers drop the brand — and, when there's also no
@@ -572,29 +581,22 @@ export function cardUsageFooterSegment(
       + `↑${compactTokenCount(usage.tokens.in)} ↓${compactTokenCount(usage.tokens.out)}`,
     );
   }
-  // Runtime identity is formatted separately by cardUsageRuntimeSegment, then
-  // the streaming card appends it to this metric string with ` · ` in one
-  // continuous markdown paragraph. Keep this function metric-only so reply-card
-  // footers remain unchanged and the streaming renderer owns the tail layout.
+  // Runtime identity is formatted separately by cardUsageRuntimeSegment. Keep
+  // this function metric-only so callers can also render identity without usage.
   return parts.length > 0 ? parts.join(' · ') : null;
 }
 
-/** Streaming-card runtime tail appended after
- * {@link cardUsageFooterSegment}'s metric text. Returns `**model** variant · effort`
- * (model bolded within the shared grey markdown) or null when there is no model.
- * `effort` is dropped when absent — no placeholder. `hasMetrics` prevents a
- * standalone runtime-only row when native usage is unavailable. The
- * model↔effort join uses a non-breaking space so the pair never wraps apart. */
+/** Runtime identity shared by status and reply cards, independent of metrics.
+ * Missing model/effort is never guessed. Keep the selected model ID intact
+ * within the label budget: CLIs such as Cursor encode effort in that ID. */
 export function cardUsageRuntimeSegment(
   usage: CardUsageSnapshot,
-  hasMetrics: boolean,
 ): string | null {
-  if (!hasMetrics) return null;
   // Strip a leading `provider/` routing prefix (e.g. `model_hub/es1_orange_o48`
   // \u2192 `es1_orange_o48`) so the card shows the bare model name, not the relay's
   // internal namespace. A value with no slash (e.g. `gpt-5.6-sol`) is untouched.
   // Keep the tail compact so the continuous usage paragraph wraps predictably.
-  const model = compactRuntimeLabel(stripModelProviderPrefix(usage.model), 20);
+  const model = compactRuntimeLabel(stripModelProviderPrefix(usage.model), 64);
   if (!model) return null;
   const variant = usage.modelBackendVariant === 'standard'
     ? 'Standard'
@@ -696,27 +698,32 @@ export function buildReplyCardFooter(opts: {
   usage?: CardUsageSnapshot;
   executionDurationMs?: number;
   waitingDurationMs?: number;
+  presentation?: ReplyCardPresentation;
   locale?: Locale;
 }): ReplyCardFooter | null {
+  const policy = resolveReplyFooterPolicy(opts.presentation?.footerPreferences);
+  if (!policy.enabled) return null;
   const parts: string[] = [];
-  const brandSeg = brandFooterSegment(opts.brand);
+  const brandSeg = !policy.brand ? null : brandFooterSegment(opts.brand);
   if (brandSeg) parts.push(brandSeg);
   let hasUsage = false;
   if (opts.usage) {
-    const usageSeg = cardUsageFooterSegment(opts.usage, opts.locale);
+    const usageSeg = !policy.usage ? null : cardUsageFooterSegment(opts.usage, opts.locale);
     if (usageSeg) { parts.push(usageSeg); hasUsage = true; }
+    const runtimeSeg = !policy.model ? null : cardUsageRuntimeSegment(opts.usage);
+    if (runtimeSeg) { parts.push(runtimeSeg); hasUsage = true; }
   }
-  const durationMs = opts.executionDurationMs;
+  const durationMs = opts.presentation?.timing?.executionDurationMs ?? opts.executionDurationMs;
   const hasDuration = typeof durationMs === 'number' && Number.isFinite(durationMs) && durationMs >= 0;
-  const waitingMs = opts.waitingDurationMs;
+  const waitingMs = opts.presentation?.timing?.waitingDurationMs ?? opts.waitingDurationMs;
   const hasWaiting = typeof waitingMs === 'number' && Number.isFinite(waitingMs) && waitingMs >= 0;
   if (hasWaiting) {
     parts.push(t('card.waiting_duration', { seconds: (waitingMs / 1000).toFixed(1) }, opts.locale));
   }
   if (hasDuration) {
-    parts.push(t('card.execution_duration', { seconds: (durationMs / 1000).toFixed(1) }, opts.locale));
+    parts.push(t(opts.presentation?.timing?.executionInProgress ? 'card.execution_until_reply' : 'card.execution_duration', { seconds: (durationMs / 1000).toFixed(1) }, opts.locale));
   }
-  const recipientOpenIds = [...new Set((opts.recipientOpenIds ?? []).filter(Boolean))];
+  const recipientOpenIds = !policy.recipients ? [] : [...new Set((opts.recipientOpenIds ?? []).filter(Boolean))];
   const hasRecipient = recipientOpenIds.length > 0;
   if (hasRecipient) {
     parts.push(
@@ -760,6 +767,23 @@ export function buildReplyCardFooter(opts: {
   };
 }
 
+/** Compose the entire footer once: text, divider and optional voice action. */
+export function buildReplyCardFooterElements(
+  opts: Parameters<typeof buildReplyCardFooter>[0] & { voiceButton?: Record<string, unknown> },
+): any[] {
+  const policy = resolveReplyFooterPolicy(opts.presentation?.footerPreferences);
+  if (!policy.enabled) return [];
+  const footer = buildReplyCardFooter(opts);
+  const voice = policy.voice ? opts.voiceButton : undefined;
+  if (!footer && !voice) return [];
+  return [{ tag: 'hr' }, ...(voice ? [{
+    tag: 'column_set', flex_mode: 'none', horizontal_spacing: 'default', columns: [
+      { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center', elements: [footer?.element ?? { tag: 'markdown', text_size: 'notation', content: ' ' }] },
+      { tag: 'column', width: 'auto', vertical_align: 'center', elements: [voice] },
+    ],
+  }] : [footer!.element])];
+}
+
 /** Clone a caller-supplied schema-2 card and append the canonical reply
  * footer. Returns null for cards without a v2 `body.elements` array or when a
  * caller-owned element already occupies the globally unique footer id. */
@@ -786,8 +810,7 @@ export function appendReplyCardFooterToV2Card(
   ) {
     return null;
   }
-  const footer = buildReplyCardFooter(opts);
-  if (footer) body.elements.push({ tag: 'hr' }, footer.element);
+  body.elements.push(...buildReplyCardFooterElements(opts));
   return cloned;
 }
 
@@ -898,33 +921,6 @@ function unescapeFenceLines(input: string): string {
   return input.replace(/^[ ]{0,3}(?:\\`){3,}[^\n`]*$/gm, m => m.replace(/\\`/g, '`'));
 }
 
-/** Source markers let CommonMark identify actual image references without
- * rewriting code examples, escaped syntax, or the surrounding Markdown. */
-function cardImageReferences(input: string): Array<{ position: number; source: string }> {
-  if (!input.includes('![')) return [];
-  const prefix = chooseLinkMarkerPrefix(input);
-  const positions: number[] = [];
-  const marked = input.replace(/\\.|!\[/gs, (match: string, offset: number) => {
-    if (match !== '![') return match;
-    const id = positions.push(offset) - 1;
-    return `${prefix}${id}x![`;
-  });
-  const marker = new RegExp(`${escapeRegExp(prefix)}(\\d+)x$`);
-  const images: Array<{ position: number; source: string }> = [];
-  const inspect = (tokens: Token[]): void => {
-    for (let i = 0; i < tokens.length; i++) {
-      const token = tokens[i];
-      if (token.type === 'image') {
-        const match = tokens[i - 1]?.content.match(marker);
-        if (match) images.push({ position: positions[Number(match[1])], source: token.attrGet('src') ?? '' });
-      }
-      if (token.children) inspect(token.children);
-    }
-  };
-  inspect(imageScanMd.parse(marked, {}));
-  return images.sort((a, b) => a.position - b.position);
-}
-
 /** Resolve real Markdown images, preserving code examples and untouched source.
  * The image-only rule supplies exact source spans; the full parser above
  * decides which occurrences are actually images rather than literal code. */
@@ -933,7 +929,7 @@ export async function resolveCardMarkdownImages(
   resolveSource: (source: string) => Promise<string | undefined>,
 ): Promise<string> {
   input = unescapeFenceLines(input);
-  const references = cardImageReferences(input);
+  const references = cardMarkdownImageReferences(input);
   if (!references.length) return input;
   const env: Record<string, unknown> = {};
   imageScanMd.parse(input, env);
@@ -955,7 +951,7 @@ export async function resolveCardMarkdownImages(
 }
 
 function normalizeCardImages(input: string, omitAll = false): string {
-  const unsupported = new Set(cardImageReferences(input)
+  const unsupported = new Set(cardMarkdownImageReferences(input)
     .filter(image => omitAll || !FEISHU_IMG_KEY.test(image.source)).map(image => image.position));
   return input.replace(/!\[/g, (match: string, offset: number) =>
     unsupported.has(offset) ? '[Image omitted] [' : match);
@@ -1068,7 +1064,7 @@ export function extractFirstReplyCardHeading(input: string): ExtractedReplyCardH
  *      markdown widget doesn't render ATX `#`).
  *   3. Code fences → re-emitted with the original backtick run, joined with
  *      blank lines on either side (Feishu's widget needs them to recognise the
- *      fence).
+ *      fence). Code nested in lists/quotes becomes a standalone element.
  *   4. Everything else → original source slice, glued by blank lines.
  *
  * Prose between promoted headings/tables/image rows is merged into one
@@ -1199,12 +1195,41 @@ function buildMarkdownElements(
       continue;
     }
 
-    // Generic open token (paragraph_open, bullet_list_open, ordered_list_open,
-    // blockquote_open, …): slice source by the open-token's line map and skip
-    // to the matching close.
+    // Lark can omit fences nested inside lists/quotes. Lift those code blocks
+    // into standalone elements; keep the surrounding source (and numbering)
+    // in order instead of handing the unsupported container to its renderer.
     if (t.type.endsWith('_open') && t.map) {
-      buf.push(sliceLines(lines, t.map as [number, number]));
-      i = findMatchingClose(tokens, i) + 1;
+      const end = findMatchingClose(tokens, i);
+      let startLine = t.map[0];
+      for (let nested = i + 1; nested < end; nested++) {
+        const code = tokens[nested];
+        // A continuation paragraph has lost its opening list item/quote in
+        // the previous element. Use the parsed text so its old indentation
+        // cannot turn prose into an accidental indented code block.
+        if (startLine > t.map[0] && code.type === 'paragraph_open' && code.map
+          && tokens[nested - 1].nesting !== 1) {
+          buf.push(sliceLines(lines, [startLine, code.map[0]]));
+          buf.push(tokens[nested + 1].content);
+          startLine = code.map[1];
+          continue;
+        }
+        if ((code.type !== 'fence' && code.type !== 'code_block') || !code.map) continue;
+        buf.push(sliceLines(lines, [startLine, code.map[0]]));
+        flushBuf();
+        const info = (code.info || '').trim();
+        if (code.type === 'fence' && VEGA_LITE_FENCE_LANGS.has(info.split(/\s+/)[0]!.toLowerCase())) {
+          elements.push(...buildVegaLiteElements(code.content, layoutBudget));
+        } else {
+          const fence = code.markup || '`'.repeat(Math.max(3,
+            ...(code.content.match(/`+/g) ?? []).map(run => run.length + 1)));
+          // Do not run code through flushBuf: its prose whitespace cleanup
+          // would collapse intentional blank lines inside the code block.
+          elements.push({ tag: 'markdown', content: `${fence}${info}\n${code.content}${fence}` });
+        }
+        startLine = code.map[1];
+      }
+      buf.push(sliceLines(lines, [startLine, t.map[1]]));
+      i = end + 1;
       continue;
     }
 
@@ -1375,8 +1400,6 @@ const IMG_ROW_LINE = /^ {0,3}(?:!\[[^\]]*\]\([^)\s]+\)\s*){2,}$/;
  * and a native `img` element with a non-key as its "img_key" makes Feishu reject
  * the whole card. Non-key images are downgraded before this layout pass.
  */
-const FEISHU_IMG_KEY = /^img_v\d+_[A-Za-z0-9_-]+$/i;
-
 type BodySegment = { type: 'text'; content: string } | { type: 'imgrow'; keys: string[] } | { type: 'img'; key: string; alt: string };
 
 /**
@@ -1526,7 +1549,7 @@ export function hasMarkdown(text: string): boolean {
  * addressing line (e.g. top-level broadcasts have no specific recipient).
  *
  * `brand` is the sending bot's configured `brandLabel` (see
- * {@link brandFooterSegment}): unset → default `Powered by [botmux](...) with :LOVE:`, `''` → brand
+ * {@link brandFooterSegment}): unset → default botmux link, `''` → brand
  * suppressed, else custom. When brand, usage, and recipient are all absent the
  * whole footer (HR included) is omitted.
  */
@@ -1540,19 +1563,18 @@ export function buildMarkdownCard(
   workingDir?: string,
   localHomeLinkMode: LocalHomeLinkMode = 'filesystem',
   usage?: CardUsageSnapshot,
+  presentation?: ReplyCardPresentation,
 ): string {
   const elements = md ? buildCardBodyElements(md, workingDir, localHomeLinkMode) : [];
-  const footer = buildReplyCardFooter({
+  const footerElements = buildReplyCardFooterElements({
     brand,
     recipientOpenIds: recipientOpenId ? [recipientOpenId] : [],
     usage,
     locale,
+    presentation,
   });
   // No brand, usage, or recipient → no footer at all (skip the orphan HR too).
-  if (footer) {
-    elements.push({ tag: 'hr' });
-    elements.push(footer.element);
-  }
+  elements.push(...footerElements);
   const card = createReplyCard(elements);
   fitBuiltCard(card, 'markdown_card');
   return JSON.stringify(card);
@@ -1563,6 +1585,7 @@ export function buildMarkdownCard(
 export function buildCanonicalFinalReplyCard(opts: {
   markdown: string;
   feedback?: { policy: FeedbackPolicy };
+  completionProposal?: CompletionProposalRecord;
   recipientOpenId?: string;
   brand?: string;
   locale?: Locale;
@@ -1571,21 +1594,28 @@ export function buildCanonicalFinalReplyCard(opts: {
   usage?: CardUsageSnapshot;
   executionDurationMs?: number;
   waitingDurationMs?: number;
+  presentation?: ReplyCardPresentation;
 }): string {
   const elements = opts.markdown
     ? buildCardBodyElements(opts.markdown, opts.workingDir, opts.localHomeLinkMode ?? 'filesystem')
     : [];
-  if (opts.feedback) elements.push(buildFeedbackElement(opts.feedback.policy));
-  const footer = buildReplyCardFooter({
+  const footerElements = buildReplyCardFooterElements({
     brand: opts.brand,
     recipientOpenIds: opts.recipientOpenId ? [opts.recipientOpenId] : [],
     usage: opts.usage,
+    presentation: opts.presentation,
     executionDurationMs: opts.executionDurationMs,
     waitingDurationMs: opts.waitingDurationMs,
     locale: opts.locale,
   });
-  if (footer) elements.push({ tag: 'hr' }, footer.element);
+  elements.push(...footerElements);
   const card = createReplyCard(elements);
+  composeFinalCardSections(card, {
+    ...(opts.completionProposal
+      ? { completionProposal: buildCompletionProposalElement(opts.completionProposal) }
+      : {}),
+    ...(opts.feedback ? { feedback: buildFeedbackElement(opts.feedback.policy) } : {}),
+  });
   fitBuiltCard(card, 'final_reply');
   return JSON.stringify(card);
 }
@@ -1627,6 +1657,7 @@ export function buildContextualReplyCard(opts: {
   usage?: CardUsageSnapshot;
   executionDurationMs?: number;
   waitingDurationMs?: number;
+  presentation?: ReplyCardPresentation;
   feedback?: { policy: FeedbackPolicy };
 }): string {
   const {
@@ -1670,18 +1701,16 @@ export function buildContextualReplyCard(opts: {
 
   if (opts.feedback) elements.push(buildFeedbackElement(opts.feedback.policy));
 
-  const footer = buildReplyCardFooter({
+  const footerElements = buildReplyCardFooterElements({
     brand,
     recipientOpenIds: recipientOpenId ? [recipientOpenId] : [],
     usage,
     locale,
     executionDurationMs: opts.executionDurationMs,
     waitingDurationMs: opts.waitingDurationMs,
+    presentation: opts.presentation,
   });
-  if (footer) {
-    elements.push({ tag: 'hr' });
-    elements.push(footer.element);
-  }
+  elements.push(...footerElements);
 
   const card = createReplyCard(elements);
   fitBuiltCard(card, 'contextual_reply');

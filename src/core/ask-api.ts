@@ -10,6 +10,7 @@ import { registerAsk } from './ask-broker.js';
 import { parseOption, parseAskQuestions } from './ask-questions.js';
 export { parseAskQuestions } from './ask-questions.js';
 import type { CreateAskInput, AskResult, AskOption, AskQuestion } from './ask-types.js';
+import { CODEX_ASYNC_ASK_ORIGIN, parseCodexAsyncUserInput, type CodexAsyncUserInput } from '../services/codex-async-user-input.js';
 
 export interface AskApiBody {
   sessionId: string;
@@ -27,6 +28,9 @@ export interface AskApiBody {
   /** Caller kind ('hook' | 'explicit' | …) namespacing the identity so an
    *  explicit `botmux ask` can't re-claim a hook ask's card. Optional. */
   originKind?: string;
+  acknowledge?: boolean;
+  asyncUserInput?: CodexAsyncUserInput;
+  asyncFailure?: 'limit' | 'invalid_questions';
 }
 
 export type AskApiBodyError =
@@ -45,10 +49,13 @@ export type AskApiBodyError =
   | 'duplicate_option_key'
   | 'bad_questions'
   | 'bad_question_shape'
+  | 'bad_inputMode'
   | 'bad_multiSelect'
   | 'bad_defaultSelectedKeys'
   | 'bad_requestId'
-  | 'bad_originKind';
+  | 'bad_originKind'
+  | 'bad_acknowledge'
+  | 'bad_asyncUserInput';
 
 /** Validate the request body. Returns either the parsed body or an error code
  *  ready to be sent back as `{ ok: false, error }` with HTTP 400.
@@ -88,15 +95,31 @@ export function parseAskBody(raw: unknown): AskApiBody | { error: AskApiBodyErro
     if (typeof r.originKind !== 'string' || !r.originKind.trim() || r.originKind.length > 32) {
       return { error: 'bad_originKind' };
     }
+    // The `host_*` namespace ('host_explicit', 'host_cross_principal_*') is
+    // daemon-internal: those claimants are constructed in-process and the
+    // broker grants the label GC / handoff / persistence exemptions. An HTTP
+    // client must never mint one by typing it — it would collect the privileges
+    // without any daemon-owned record. Reject at the boundary.
+    if (r.originKind.startsWith('host_')) {
+      return { error: 'bad_originKind' };
+    }
     originKind = r.originKind;
   }
 
+  if (r.acknowledge !== undefined && typeof r.acknowledge !== 'boolean') return { error: 'bad_acknowledge' };
+
+  if (r.asyncFailure !== undefined && (originKind !== CODEX_ASYNC_ASK_ORIGIN
+    || (r.asyncFailure !== 'limit' && r.asyncFailure !== 'invalid_questions'))) return { error: 'bad_asyncUserInput' };
   let questions: AskQuestion[];
+  const asyncUserInput = r.asyncUserInput === undefined ? undefined : parseCodexAsyncUserInput(r.asyncUserInput);
+  if ((r.asyncUserInput !== undefined && !asyncUserInput)
+    || (originKind === CODEX_ASYNC_ASK_ORIGIN) !== (asyncUserInput !== undefined)
+    || (asyncUserInput && requestId !== asyncUserInput.itemId)) return { error: 'bad_asyncUserInput' };
 
   if (Array.isArray(r.questions)) {
     // 新格式：questions[] 多问多选
     if (r.questions.length === 0) return { error: 'bad_questions' };
-    const parsed = parseAskQuestions(r.questions);
+    const parsed = parseAskQuestions(r.questions, { allowSingleOption: !!asyncUserInput });
     if (typeof parsed === 'string') return { error: parsed };
     questions = parsed;
   } else if (Array.isArray(r.options) && typeof r.prompt === 'string' && r.prompt.trim()) {
@@ -129,6 +152,9 @@ export function parseAskBody(raw: unknown): AskApiBody | { error: AskApiBodyErro
     timeoutMs: r.timeoutMs,
     ...(requestId !== undefined ? { requestId } : {}),
     ...(originKind !== undefined ? { originKind } : {}),
+    ...(r.acknowledge !== undefined ? { acknowledge: r.acknowledge as boolean } : {}),
+    ...(asyncUserInput ? { asyncUserInput } : {}),
+    ...(r.asyncFailure ? { asyncFailure: r.asyncFailure as 'limit' | 'invalid_questions' } : {}),
   };
   // Reject semantics this receiver did not parse instead of silently creating
   // a different kind of Ask. Identity claims remain on the raw body for the

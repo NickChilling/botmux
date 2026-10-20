@@ -21,9 +21,12 @@ export interface AskOption {
  *  `label` 是人类可读的标题（暂保留向后兼容），`prompt` 是问题正文，
  *  `options` 是该问题的选项列表，`multiSelect` 表示是否允许多选。 */
 export interface AskQuestion {
+  /** Native text-only questions use the existing conversation text-reply path.
+   * They have no options and cannot be settled by an empty button submit. */
+  inputMode?: 'text';
   /** 问题正文文本，展示给用户。 */
   prompt: string;
-  /** 该问题的选项列表，调用方保证 `options.length ≥ 2` 且 `key` 唯一。 */
+  /** 该问题的选项列表，调用方保证 `options.length ≥ 2（inputMode=text 时为空）` 且 `key` 唯一。 */
   options: ReadonlyArray<AskOption>;
   /** true = 多选（可选多个 key）；false = 单选（恰好 1 个 key）。 */
   multiSelect: boolean;
@@ -64,6 +67,8 @@ export type AskResult =
   | {
       kind: 'invalidated';
       reason: string;
+      /** Delivery never completed; do not describe this as a missing answer. */
+      failureCode?: 'card_delivery_failed';
       selected: null;
       by: null;
       comment: null;
@@ -92,6 +97,8 @@ export interface AskJsonOutput {
  *
  *  v0.1.8 变更：`options`/`prompt` 字段替换为 `questions: ReadonlyArray<AskQuestion>`。 */
 export interface CreateAskInput {
+  /** Frozen by the daemon from the exact document turn, never CLI-supplied. */
+  deliveryTarget?: AskDeliveryTarget;
   /** Daemon-bound presentation target; never accepted directly from CLI JSON. */
   replyCardTarget?: { turnId: string; dispatchAttempt?: number;
     /** Frozen by authenticated daemon admission; never accepted from CLI JSON. */
@@ -121,7 +128,7 @@ export interface CreateAskInput {
    *  record that can never be re-claimed. Undefined → treated as false (fail
    *  closed: don't persist when the backend is unknown). */
   backendSurvivesRestart?: boolean;
-  /** 问题列表，调用方保证每问 `options.length ≥ 2` 且 key 唯一。 */
+  /** 问题列表，调用方保证每问 `options.length ≥ 2（inputMode=text 时为空）` 且 key 唯一。 */
   questions: ReadonlyArray<AskQuestion>;
   /** Absolute deadline; computed by caller from `--timeout`. Broker won't
    *  re-compute. */
@@ -139,6 +146,7 @@ export interface CreateAskInput {
  *
  *  v0.1.8 变更：`options`/`prompt` 替换为 `questions`。 */
 export interface PendingAsk {
+  deliveryTarget?: AskDeliveryTarget;
   replyCardTarget?: CreateAskInput['replyCardTarget'];
   result?: AskResult;
   askId: string;
@@ -173,6 +181,15 @@ export interface PendingAsk {
    *  re-send after a daemon restart returns the ORIGINAL message_id instead of
    *  posting a duplicate card. Absent for non-resumable asks. */
   dispatchUuid?: string;
+}
+
+/** Keep the original session/chat identity separate from the IM recipient. */
+export interface AskDeliveryTarget {
+  kind: 'document-author';
+  openId: string;
+  turnId: string;
+  fileToken: string;
+  commentId: string;
 }
 
 /** Outcome of a click-resolution attempt. Card click handler maps these to

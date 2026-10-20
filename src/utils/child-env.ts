@@ -359,6 +359,12 @@ export const BOTMUX_INJECTED_ENV_KEYS = [
   'BOTMUX_AIDEN_CODEX_PARENT_PATH',
   'BOTMUX_AIDEN_CODEX_REAL_BIN',
   'BOTMUX_AIDEN_CODEX_REASONING_EFFORT',
+  // Path to the per-launch file holding the Codex shell_environment_policy
+  // overrides the aiden-codex PATH shim re-injects past Aiden's argv gate.
+  // Scrub like the other shim keys: the path embeds the session data dir and
+  // a stale value in a co-tenant pane would point the shim at another
+  // session's identity file.
+  'BOTMUX_AIDEN_CODEX_SHELL_CONFIG_FILE',
   'SESSION_DATA_DIR',
   'IS_SANDBOX',
   // botmux ask/hooks use these to locate the daemon and route back to the
@@ -417,6 +423,7 @@ export const BOTMUX_INJECTED_ENV_KEYS = [
   // ('streaming' | 'footer' | 'off'). Injected explicitly so sandboxed offline
   // fallback cannot drift to the default when bots.json is unreadable.
   'BOTMUX_USAGE_DISPLAY',
+  'BOTMUX_REPLY_FOOTER',
   // Normalized sparse reply-style snapshot. Shared/native skill loaders and
   // `botmux send` consume this same session value; it must never enter a
   // co-tenant tmux server's ambient environment.
@@ -452,6 +459,9 @@ export const BOTMUX_INJECTED_ENV_KEYS = [
   // inherit a stale value from a co-tenant tmux server.
   'BOTMUX_MULTI_TOPIC_ENABLED',
   'BOTMUX_READY_COMMAND',
+  // Structured end-of-turn idle report command, injected per session for
+  // adapters that opt in (dsh-tui). Not a credential and not fatal when absent.
+  'BOTMUX_TURN_IDLE_COMMAND',
   // Per-session computed shell command string: the user's own statusLine
   // command that `botmux statusline` chains to after persisting the snapshot.
   // Not a credential — it is what the user already put in their settings.json.
@@ -467,6 +477,7 @@ export const BOTMUX_INJECTED_ENV_KEYS = [
   // every governed call silently resolves the real tool and runs as the machine
   // account.
   'BOTMUX_IDENTITY_BIN',
+  'BOTMUX_LARK_TOOL_BINDING',
   'ZDOTDIR',
   'BASH_ENV',
   // Git attribution for the acting person. Same reason: askpass and the
@@ -543,8 +554,10 @@ export const SESSION_TURN_MARKER_ENV_KEYS = [
   '__OWNER_OPEN_ID',
   // Unguessable pane/profile authority channel (daemon-rotated capability).
   'BOTMUX_ORIGIN_CHANNEL_ID',
-  // Sandbox send-relay directory — a per-session capability path.
+  // Sandbox send-relay directory — a per-session capability path — and the
+  // credential-only "relay serves `send` only" scope marker that rides with it.
   'BOTMUX_SEND_RELAY',
+  'BOTMUX_SEND_RELAY_SCOPE',
   // Session-scoped MCP gateway capability + fail-closed marker.
   'BOTMUX_MCP_GATEWAY_SOCKET',
   'BOTMUX_MCP_GATEWAY_REQUIRED',
@@ -562,6 +575,7 @@ export const SESSION_TURN_MARKER_ENV_KEYS = [
   // Per-bot usage display, resolved via resolveUsageDisplay(cfg) per session;
   // env is never a config input for it.
   'BOTMUX_USAGE_DISPLAY',
+  'BOTMUX_REPLY_FOOTER',
   // Spawn-time normalized reply style; unset/scrub at every session boundary to
   // avoid cross-bot guide/card drift through a shared persistent backend.
   'BOTMUX_REPLY_STYLE',
@@ -570,6 +584,10 @@ export const SESSION_TURN_MARKER_ENV_KEYS = [
   'BOTMUX_CODEX_APP_CONTROL_BOOTSTRAP',
   // Ready-gate hook command, sessionReadyHookCommand() per session.
   'BOTMUX_READY_COMMAND',
+  // Turn-idle report command, turnIdleHookCommand() per session. Same contract
+  // as BOTMUX_READY_COMMAND: a stale inherited copy would make a pane report
+  // against another session's turn, so it is scrubbed at every boundary.
+  'BOTMUX_TURN_IDLE_COMMAND',
   // Shadowed user statusLine command, resolved per session from the spawn cwd
   // + user settings (worker.ts); an inherited copy points at another project.
   'BOTMUX_STATUSLINE_CHAIN',
@@ -592,6 +610,7 @@ export function isCliIdentityPath(value: string | undefined): boolean {
 }
 
 export function scrubCliIdentityEnv(env: NodeJS.ProcessEnv): void {
+  delete env.BOTMUX_LARK_TOOL_BINDING;
   const bin = env.BOTMUX_IDENTITY_BIN?.replace(/[\\/]+$/, '');
   const managed = (value: string | undefined): boolean => !!value && (
     isCliIdentityPath(value) || !!bin && (value === bin || value.startsWith(`${bin}/`) || value.startsWith(`${bin}\\`))
