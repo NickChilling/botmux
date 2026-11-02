@@ -72,7 +72,8 @@ import { buildSummaryCommandPrompt, type SummaryChatKind, type SummaryCommandMat
 import { DEFAULT_SUMMARY_PROMPT, summaryRangeFromBotConfig } from '../../services/summary-range-store.js';
 import { isSubstituteEnabledForChat } from '../../services/substitute-chat-toggle-store.js';
 import { isP2pForceTopicRoot, recordP2pForceTopicRoot } from '../../services/p2p-force-topic-store.js';
-import { evaluateMessageListener, resolveListenerSenderIdentity, buildListenerBotAppIdToOpenId, collectListenerBotAppIds, type MessageListenerMatch } from '../../services/message-listener.js';
+import { findMessageListenerForChat, evaluateMessageListener, resolveListenerSenderIdentity, buildListenerBotAppIdToOpenId, collectListenerBotAppIds, type MessageListenerMatch } from '../../services/message-listener.js';
+import { isMessageListenerTopic, listenerTopicReplyContext, type ListenerTopicReply } from '../../services/message-listener-topic-access.js';
 import {
   parseVcMeetingPushEvent,
   VC_BOT_MEETING_ACTIVITY_EVENT,
@@ -1737,6 +1738,7 @@ export const TALK_REASONS = [
   'teamBot',
   'teamMember',
   'allowedChatGroup',
+  'listenerTopic',
   'open',
   'chatGrant',
   'globalGrant',
@@ -1961,7 +1963,7 @@ export function canTalk(
  */
 export function evaluateTalk(
   larkAppId: string, chatId: string | undefined, senderOpenId: string | undefined,
-  senderUnionId?: string, memberUnionId?: string, chatType?: ChatKind,
+  senderUnionId?: string, memberUnionId?: string, chatType?: ChatKind, topicReply?: ListenerTopicReply,
 ): TalkEvaluation {
   const bot = getBot(larkAppId);
   // allowedChatGroups 是"talk-open 的 chat_id 列表"：当前消息来自其中之一即放行（仅 canTalk）。
@@ -1981,6 +1983,14 @@ export function evaluateTalk(
   // 承载 workingDir 写下的，不能当作 talk 来源（详见 evaluateSessionGroupTalk）。
   // 命中会话群时无论表不表态，都不再回落 oncall 腿。
   const sessionGroup = chatId ? getSessionGroup(chatId) : undefined;
+  // Listener configuration authorizes only this recorded topic's explicitly
+  // addressed follow-ups. No context is supplied by management/ask surfaces.
+  if (!sessionGroup && chatType === 'group' && chatId && senderOpenId
+    && topicReply?.explicitlyMentioned === true
+    && findMessageListenerForChat(bot, chatId)
+    && isMessageListenerTopic(config.session.dataDir, larkAppId, chatId, topicReply.rootMessageId)) {
+    return { allowed: true, reason: 'listenerTopic' };
+  }
   if (sessionGroup) {
     const inherited = evaluateSessionGroupTalk(bot, larkAppId, chatId!, senderOpenId, sessionGroup);
     if (inherited) return inherited;
@@ -2060,8 +2070,10 @@ export function evaluateBotTalk(
   chatId: string | undefined,
   senderOpenId: string | undefined,
   senderUnionId?: string,
+  topicReply?: ListenerTopicReply,
 ): TalkEvaluation {
-  const ev = evaluateTalk(larkAppId, chatId, senderOpenId, senderUnionId);
+  const ev = evaluateTalk(larkAppId, chatId, senderOpenId, senderUnionId, undefined,
+    topicReply ? 'group' : undefined, topicReply);
   if (ev.allowed) return ev;
   // 黑名单否决不可被 bot 独有的团队拉群 chat 维度腿复活：被黑 bot 即使出现在团队
   // 拉群里也照样拒绝（人侧 evaluateTalk 已挡 union 腿，这里挡 chat 腿）。
@@ -2381,7 +2393,8 @@ export async function checkGroupMessageAccess(
 ): Promise<'allowed' | 'not_allowed' | 'ignore'> {
   const mentioned = isBotMentioned(larkAppId, message, senderOpenId);
   // 群消息访问检查只在人路径调用，union 走 memberUnionId 腿（不进 bot-trust）。
-  const isAllowed = canTalk(larkAppId, chatId, senderOpenId, undefined, memberUnionId);
+  const isAllowed = evaluateTalk(larkAppId, chatId, senderOpenId, undefined, memberUnionId, 'group',
+    listenerTopicReplyContext(message, mentioned)).allowed;
 
   logger.debug(`Check group message access: mentioned=${mentioned}, isAllowed=${isAllowed}`);
   if (mentioned) {
@@ -4203,7 +4216,12 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         // bot 能不能在本会话说话：此处只判定一次，紧随的 p2p promote、下方 fold 的
         // mentionedThisBot 以及再往后的 talk gate 共用同一结论；之间只有路由计算，
         // 不改授权状态（曾是两条手抄 OR 链，漏一处即「能路由但不能 fold」类二次分裂）。
-        const botTalk = evaluateBotTalk(larkAppId, chatId, senderOpenId, senderUnionId);
+        const topicReply = listenerTopicReplyContext(message, isBotMentioned(larkAppId, message, undefined));
+        const botTalk = evaluateBotTalk(larkAppId, chatId, senderOpenId, senderUnionId, topicReply);
+        if (botTalk.reason === 'listenerTopic' && topicReply) {
+          ctx.scope = 'thread';
+          ctx.anchor = topicReply.rootMessageId;
+        }
         if (botTalk.allowed) {
           await promoteExplicitP2pTopicIfNeeded({
             larkAppId, chatId, chatType, message, routing: ctx, routingSource: decision.source,
@@ -4221,7 +4239,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           logger.info(`[/t] Force-topic override (bot sender): msg=${messageId.substring(0, 12)} → thread-scope, anchor=msg`);
         }
         const ownsThreadSession = ctx.scope === 'thread'
-          ? (handlers.isSessionOwner?.(ctx.anchor, larkAppId) ?? false)
+          ? (botTalk.reason === 'listenerTopic' || (handlers.isSessionOwner?.(ctx.anchor, larkAppId) ?? false))
           : false;
         let replyRootId = await maybeFoldMentionedRegularGroupThreadToChat({
           larkAppId, chatId, chatType, message, routing: ctx, forceTopicApplied: forcedTopic, mentionedThisBot: botTalk.allowed, ownsThreadSession,
@@ -4302,7 +4320,9 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
       );
       // 人的路径（bot 发送方已在上面的分支 return）：union 走 memberUnionId 腿，
       // 不进 bot-trust 腿——teamBot 只认 bot-locked union。
-      const isAllowed = canTalk(larkAppId, chatId, senderOpenId, undefined, humanSenderUnionId, chatType);
+      const topicReply = listenerTopicReplyContext(message, isBotMentioned(larkAppId, message, senderOpenId));
+      const humanTalk = evaluateTalk(larkAppId, chatId, senderOpenId, undefined, humanSenderUnionId, chatType, topicReply);
+      const isAllowed = humanTalk.allowed;
       // Trusted creator metadata affects addressing only. Unauthorized senders
       // must not trigger Lark/registry I/O; operation gates stay unchanged.
       if (isAllowed) {
@@ -4369,6 +4389,11 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         anchor: decision.anchor,
       };
       let routingSource = decision.source;
+      if (humanTalk.reason === 'listenerTopic' && topicReply) {
+        routing.scope = 'thread';
+        routing.anchor = topicReply.rootMessageId;
+        routingSource = 'real-thread';
+      }
       // Default/chat-mode DMs normally stay in one flat chat-scope session, even
       // when Lark supplies root_id + thread_id. An explicitly seeded topic (for
       // example via /t) is the exception: an app-scoped /t provenance marker or
@@ -4577,7 +4602,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
       let ownsSession = handlers.isSessionOwner?.(routing.anchor, larkAppId) ?? false;
 
       const ownsThreadSessionBeforeFold = routing.scope === 'thread'
-        ? (handlers.isSessionOwner?.(routing.anchor, larkAppId) ?? false)
+        ? (humanTalk.reason === 'listenerTopic' || (handlers.isSessionOwner?.(routing.anchor, larkAppId) ?? false))
         : false;
       const foldedReplyRootId = await maybeFoldMentionedRegularGroupThreadToChat({
         larkAppId, chatId, chatType, message, routing, forceTopicApplied, mentionedThisBot: explicitlyMentionedThisBot, ownsThreadSession: ownsThreadSessionBeforeFold,

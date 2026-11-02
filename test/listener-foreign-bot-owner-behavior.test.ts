@@ -22,6 +22,8 @@
  * Run:  pnpm vitest run test/listener-foreign-bot-owner-behavior.test.ts
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { isMessageListenerTopic, recordMessageListenerTopic } from '../src/services/message-listener-topic-access.js';
+import { config } from '../src/config.js';
 
 const mocks = vi.hoisted(() => {
   process.env.SESSION_DATA_DIR = `${process.env.TMPDIR ?? '/tmp'}/botmux-listener-owner-behavior-${process.pid}`;
@@ -89,7 +91,7 @@ vi.mock('../src/core/worker-pool.js', async () => {
   return { ...actual, forkWorker: (...args: any[]) => mocks.forkWorker(...args) };
 });
 
-import { registerBot } from '../src/bot-registry.js';
+import { registerBot, getBot } from '../src/bot-registry.js';
 import { sessionKey } from '../src/core/types.js';
 import {
   __testOnly_activeSessions as activeSessions,
@@ -174,6 +176,34 @@ describe('handleNewTopic — foreign-bot sender never owns the session (review P
     expect(session.quoteTargetSenderIsBot).toBe(true);
     // Registered under the chat-scope anchor.
     expect(activeSessions.get(sessionKey('om_alert_1', APP))?.ownerOpenId).toBeUndefined();
+  });
+
+  it('records only listener-created thread provenance', async () => {
+    const ctx = { ...makeCtx('om_listener_thread', 'om_listener_thread'), scope: 'thread' as const };
+    await handleNewTopic(makeEventData('om_listener_thread', ALERT_BOT, 'app'), ctx);
+    expect(isMessageListenerTopic(config.session.dataDir, APP, CHAT, 'om_listener_thread')).toBe(true);
+    expect(isMessageListenerTopic(config.session.dataDir, APP, CHAT, 'om_alert_1')).toBe(false);
+  });
+
+  it('a human guest entering a recorded listener topic does not become its owner', async () => {
+    const bot = getBot(APP);
+    bot.botOpenId = 'ou_receiver';
+    bot.config.oncallChats = undefined;
+    bot.config.globalMessageListener = { enabled: true, prompt: 'observe alerts' };
+    recordMessageListenerTopic(config.session.dataDir, APP, CHAT, 'om_listener_guest');
+    const event = makeEventData('om_guest_reply', 'ou_guest', 'user');
+    Object.assign(event.message, {
+      chat_type: 'group', root_id: 'om_listener_guest', thread_id: 'omt_guest',
+      mentions: [{ key: '@_receiver', name: 'receiver', id: { open_id: 'ou_receiver' } }],
+    });
+    await handleNewTopic(event, {
+      chatId: CHAT, messageId: 'om_guest_reply', chatType: 'group',
+      scope: 'thread', anchor: 'om_listener_guest', larkAppId: APP,
+    });
+    expect(mocks.createSession).toHaveBeenCalledTimes(1);
+    expect(mocks.created[0].ownerOpenId).toBeUndefined();
+    expect(mocks.created[0].creatorOpenId).toBe('ou_guest');
+    expect(activeSessions.get(sessionKey('om_listener_guest', APP))?.ownerOpenId).toBeUndefined();
   });
 
   it('control — human sender on the same route DOES become the owner', async () => {

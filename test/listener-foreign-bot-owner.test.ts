@@ -39,8 +39,8 @@ describe('handleNewTopic foreign-bot ownership suppression', () => {
   it('derives a foreign-bot-sender flag and owner-suppressed vars', () => {
     expect(region).toContain('const isForeignBotSender = isBotSenderType');
     expect(region).toContain('isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenId)');
-    expect(region).toContain('const ownerOpenIdForSession = isForeignBotSender ? undefined : senderOpenId;');
-    expect(region).toContain('const ownerUnionIdForSession = isForeignBotSender ? undefined : senderUnionId;');
+    expect(region).toContain('const ownerOpenIdForSession = isForeignBotSender || listenerTopicGuest ? undefined : senderOpenId;');
+    expect(region).toContain('const ownerUnionIdForSession = isForeignBotSender || listenerTopicGuest ? undefined : senderUnionId;');
   });
 
   it('assigns session/ds owner from the suppressed vars, not the raw sender', () => {
