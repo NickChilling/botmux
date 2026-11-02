@@ -2512,6 +2512,55 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
   });
 
+  it.each(['user', 'app'] as const)('admits an ungranted %s mention only inside a recorded listener topic', async senderType => {
+    setupBotState({
+      allowedUsers: ['ou_owner'],
+      regularGroupReplyMode: 'chat',
+      messageListeners: { chat_listener: { enabled: true, prompt: 'observe alerts' } },
+    });
+    mockGetChatMode.mockResolvedValue('group');
+    mockReadFileSync.mockImplementation(path => String(path).includes('message-listener-topics')
+      ? JSON.stringify({ version: 1, appId: MY_APP_ID, chatId: 'chat_listener', rootId: 'om_listener' })
+      : '{}');
+    handlers.isSessionOwner.mockImplementation(root => root === 'om_listener');
+    const event = makeBotMessageEvent({
+      senderType, senderOpenId: 'ou_external', chatId: 'chat_listener',
+      rootId: 'om_listener', threadId: 'omt_listener',
+      content: JSON.stringify({ text: '@_bot_a continue' }),
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+    expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'thread', anchor: 'om_listener', chatId: 'chat_listener', larkAppId: MY_APP_ID,
+    }));
+    expect(mockReplyMessage).not.toHaveBeenCalled();
+  });
+
+  it.each(['no-mention', 'other-root', 'blocked', 'disabled', 'quote'] as const)(
+    'does not inherit listener topic authorization for %s', async condition => {
+      setupBotState({
+        allowedUsers: ['ou_owner'],
+        resolvedBlockedUsers: condition === 'blocked' ? ['ou_external'] : [],
+        messageListeners: { chat_listener: { enabled: condition !== 'disabled', prompt: 'observe alerts' } },
+      });
+      mockReadFileSync.mockImplementation(path => String(path).includes('message-listener-topics')
+        ? JSON.stringify({ version: 1, appId: MY_APP_ID, chatId: 'chat_listener', rootId: 'om_listener' })
+        : '{}');
+      const event = makeBotMessageEvent({
+        senderOpenId: 'ou_external', chatId: 'chat_listener',
+        rootId: condition === 'other-root' ? 'om_other' : 'om_listener',
+        threadId: condition === 'quote' ? null : 'omt_listener',
+        content: JSON.stringify({ text: 'continue' }),
+        mentions: condition === 'no-mention' ? [] : [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+      });
+      await capturedHandlers['im.message.receive_v1'](event);
+      await flushEventWork();
+      expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+      expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    },
+  );
+
   it('routes non-mentioned bot messages through configured group listener', async () => {
     setupBotState({
       allowedUsers: [USER_OPEN_ID],

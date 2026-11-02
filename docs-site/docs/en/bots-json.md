@@ -312,6 +312,9 @@ Or write it directly into the bot's config:
 
 ## Group message listener
 
+Listener-created topics retain bot/chat/root provenance. Humans and other bots can explicitly @ the receiving bot inside those topics to continue without a separate talk grant, while the effective listener remains enabled. This does not grant management permission or bypass blocked senders and prompt checks. Quoted messages, other topics, and unmentioned bot replies do not inherit access. Provenance survives daemon restarts; historical topics without provenance are not inferred, and closed CLI sessions are not guaranteed to recover their context.
+
+
 Have a bot **actively watch a group**: matching group messages start a session automatically, no @ required. The classic use is **alert operations** — your monitoring/alerting system usually already has its own Lark bot posting alerts into a group, so just add this bot to that group and enable the listener; every alert triggers an investigation session, with no need to set up a separate [Webhook integration point](/en/webhook).
 
 Configure it per-group in the **Dashboard "Roles → Message Listener"** tab (with **Preview** of the last 24h of matches and a **dry run** to validate); or write `messageListeners` directly in `bots.json` (keyed by `chat_id`, valued by the config below):

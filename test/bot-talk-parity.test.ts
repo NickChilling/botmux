@@ -39,6 +39,7 @@ vi.mock('../src/config.js', async (importOriginal) => {
   };
 });
 
+import { recordMessageListenerTopic, type ListenerTopicReply } from '../src/services/message-listener-topic-access.js';
 import { registerBot, getBot } from '../src/bot-registry.js';
 import { evaluateTalk, evaluateBotTalk, canRunDaemonCommand, TALK_REASONS, type TalkReason, type ChatKind } from '../src/im/lark/event-dispatcher.js';
 import { recordTeamBot } from '../src/services/team-bots-store.js';
@@ -58,6 +59,7 @@ interface ParityCase {
   arrange: () => void;
   /** 人侧调用要不要传 chatType（仅 p2pOpen 腿读它）。 */
   chatType?: ChatKind;
+  topicReply?: ListenerTopicReply;
   /** 人侧调用的 memberUnionId（teamMember 腿走它，真人 union；默认 undefined）。 */
   humanMemberUnionId?: string;
   /** 人侧 evaluateTalk 是否放行。 */
@@ -159,6 +161,16 @@ const CASES: Record<Exclude<TalkReason, 'none'>, ParityCase> = {
     },
     human: true, bot: true,
   },
+  listenerTopic: {
+    arrange: () => {
+      restricted();
+      getBot(APP).config.globalMessageListener = { enabled: true, prompt: 'observe alerts' };
+      recordMessageListenerTopic(tempDir, APP, CHAT, 'om_listener');
+    },
+    chatType: 'group',
+    topicReply: { rootMessageId: 'om_listener', explicitlyMentioned: true },
+    human: true, bot: true,
+  },
   p2pOpen: {
     arrange: () => {
       restricted();
@@ -192,6 +204,7 @@ describe('bot talk parity — bot 闸门与人侧 evaluateTalk 同源', () => {
     bot.config.chatGrants = undefined;
     bot.config.globalGrants = undefined;
     bot.config.p2pOpen = undefined;
+    bot.config.globalMessageListener = undefined;
   });
   afterEach(() => { rmSync(tempDir, { recursive: true, force: true }); });
 
@@ -199,9 +212,9 @@ describe('bot talk parity — bot 闸门与人侧 evaluateTalk 同源', () => {
     it(`talk 源 "${reason}"：人=${c.human ? '放行' : '拦截'} / bot=${c.bot ? '放行' : '拦截'}`, () => {
       c.arrange();
       // 人侧：union 走 memberUnionId 腿（不进 bot-trust）。
-      const human = evaluateTalk(APP, CHAT, SENDER, undefined, c.humanMemberUnionId, c.chatType);
+      const human = evaluateTalk(APP, CHAT, SENDER, undefined, c.humanMemberUnionId, c.chatType, c.topicReply);
       // bot 侧：union 是飞书盖章的 bot 发送方 union。
-      const forBot = evaluateBotTalk(APP, CHAT, SENDER, SENDER_UNION);
+      const forBot = evaluateBotTalk(APP, CHAT, SENDER, SENDER_UNION, c.topicReply);
 
       expect(human.allowed).toBe(c.human);
       expect(forBot.allowed).toBe(c.bot);
@@ -230,6 +243,24 @@ describe('bot talk parity — bot 闸门与人侧 evaluateTalk 同源', () => {
     // 运行时枚举，加一条腿而不在 CASES 里说明它对 bot 的行为，这里立刻失败。
     expect(Object.keys(CASES).sort())
       .toEqual(TALK_REASONS.filter(r => r !== 'none').slice().sort());
+  });
+
+  it('listener topic permission stays scoped and never grants management access', () => {
+    CASES.listenerTopic.arrange();
+    const reply = CASES.listenerTopic.topicReply!;
+    expect(evaluateTalk(APP, CHAT, SENDER, undefined, undefined, 'group', reply).allowed).toBe(true);
+    expect(evaluateTalk(APP, CHAT, SENDER, undefined, undefined, 'group').allowed).toBe(false);
+    expect(evaluateTalk(APP, CHAT, SENDER, undefined, undefined, 'p2p', reply).allowed).toBe(false);
+    expect(evaluateTalk(APP, 'oc_other', SENDER, undefined, undefined, 'group', reply).allowed).toBe(false);
+    expect(evaluateBotTalk(APP, CHAT, SENDER, undefined, { ...reply, rootMessageId: 'om_other' }).allowed).toBe(false);
+    expect(evaluateBotTalk(APP, CHAT, SENDER, undefined, { ...reply, explicitlyMentioned: false }).allowed).toBe(false);
+    expect(evaluateBotTalk(APP, CHAT, undefined, undefined, reply).allowed).toBe(false);
+    expect(canRunDaemonCommand(APP, CHAT, SENDER, undefined, '/close')).toBe(false);
+    getBot(APP).resolvedBlockedUsers = [SENDER];
+    expect(evaluateBotTalk(APP, CHAT, SENDER, undefined, reply).reason).toBe('blocked');
+    getBot(APP).resolvedBlockedUsers = [];
+    getBot(APP).config.globalMessageListener!.enabled = false;
+    expect(evaluateBotTalk(APP, CHAT, SENDER, undefined, reply).allowed).toBe(false);
   });
 
   it('bot 专属腿：团队拉群里未知 bot 免 /grant，但真人**不**因此获得 talk', () => {

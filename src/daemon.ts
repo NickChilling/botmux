@@ -435,6 +435,7 @@ import {
 } from './core/session-title.js';
 import { settleDeferredScheduleRun } from './core/deferred-schedule-settlement.js';
 import { renderMessageListenerPrompt, refreshListenerCardTextFromResolved } from './services/message-listener.js';
+import { recordMessageListenerTopic, listenerTopicReplyContext, type ListenerTopicReply } from './services/message-listener-topic-access.js';
 import { renderCommandTriggerPrompt } from './services/command-trigger.js';
 import { sweepOrphanSandboxes } from './adapters/backend/sandbox.js';
 import { TmuxBackend } from './adapters/backend/tmux-backend.js';
@@ -4259,6 +4260,8 @@ export async function enforceMessageQuotaForCliInput(
   botSender?: boolean,
   opts?: {
     listenerAuthorized?: boolean;
+    /** Explicitly addressed reply; recheck exact topic provenance before execution. */
+    listenerTopicReply?: ListenerTopicReply;
     skipCharge?: boolean;
     alreadyAuthorizedAndCharged?: boolean;
     /** 本轮要喂给 CLI 的用户文本，交给 prompt.submit 同步校验闸做内容级判断。
@@ -4321,9 +4324,11 @@ export async function enforceMessageQuotaForCliInput(
   // 否则「团队拉群 + sender 没带 union_id」这条路径会外层放行、这里静默丢弃——比弹卡
   // 更糟：owner 以为授权生效了，消息凭空消失（#332 同款断点的最后一截）。
   // 不传（人的路径）→ 原样走 evaluateTalk，语义不变。
+  const topicReply = chatType === 'group' && opts?.listenerTopicReply?.rootMessageId === anchor
+    ? opts.listenerTopicReply : undefined;
   const ev = botSender
-    ? evaluateBotTalk(larkAppId, chatId, senderOpenId, senderUnionId)
-    : evaluateTalk(larkAppId, chatId, senderOpenId, senderUnionId, memberUnionId, chatType);
+    ? evaluateBotTalk(larkAppId, chatId, senderOpenId, senderUnionId, topicReply)
+    : evaluateTalk(larkAppId, chatId, senderOpenId, senderUnionId, memberUnionId, chatType, topicReply);
   if (!ev.allowed) {
     logger.debug(`[quota:${larkAppId}] dropping message ${messageId.substring(0, 12)} from non-allowed sender ${senderOpenId?.substring(0, 12) ?? '?'}`);
     return false;
@@ -21738,8 +21743,10 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
   // surfaces (restart/report/cards) to it. Mirror the handleThreadReply +
   // auto-create paths (isForeignBot → ownerOpenId/ownerUnionId undefined); keep
   // creatorOpenId + quoteTarget* so botmux report / first-turn quote still work.
-  const ownerOpenIdForSession = isForeignBotSender ? undefined : senderOpenId;
-  const ownerUnionIdForSession = isForeignBotSender ? undefined : senderUnionId;
+  const listenerTopicGuest = evaluateTalk(larkAppId, chatId, senderOpenId, teamTrustUnionId, senderUnionId, chatType,
+    listenerTopicReplyContext(data.message, isBotMentioned(larkAppId, data.message, undefined))).reason === 'listenerTopic';
+  const ownerOpenIdForSession = isForeignBotSender || listenerTopicGuest ? undefined : senderOpenId;
+  const ownerUnionIdForSession = isForeignBotSender || listenerTopicGuest ? undefined : senderUnionId;
   const botCfg = getBot(larkAppId).config;
   // Upgrade a card match's text/title from the resolved message (button URLs the
   // simplified match-time view dropped). See refreshListenerCardTextFromResolved.
@@ -22131,6 +22138,7 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
     || quotaConsumedBeforeSessionGroupBirth;
   if (!await enforceMessageQuotaForCliInput(larkAppId, chatId, senderOpenId, messageId, anchor, teamTrustUnionId, senderUnionId, chatType, isBotSenderType, {
     listenerAuthorized: !!messageListener,
+    listenerTopicReply: listenerTopicReplyContext(data.message, isBotMentioned(larkAppId, data.message, undefined)),
     skipCharge: isBareForceTopic || sessionGroupAlreadyCharged,
     alreadyAuthorizedAndCharged: sessionGroupAlreadyCharged,
     promptContent: content,
@@ -22370,6 +22378,9 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
   // `ds.session.reasoningEffort ?? botCfg.reasoningEffort`，所以这里写的值会保留。
   if (topicSpec?.reasoningEffort) session.reasoningEffort = topicSpec.reasoningEffort;
   sessionStore.updateSession(session);
+  if (messageListener && scope === 'thread' && chatType === 'group') {
+    recordMessageListenerTopic(config.session.dataDir, larkAppId, chatId, anchor);
+  }
 
   // Control card compensates for the card-less (avatar-style) chat-scope
   // substitute session. Topic-group substitute sessions (#475) are thread-scope
@@ -24367,7 +24378,11 @@ async function handleThreadReplyAdmitted(
     threadSenderUnionId,
     ctxChatType,
     isBotSenderType || isForeignBot,
-    { promptContent: parsed.content, promptAttachments: resources.map(r => ({ type: r.type, name: r.name })) },
+    {
+      promptContent: parsed.content,
+      promptAttachments: resources.map(r => ({ type: r.type, name: r.name })),
+      listenerTopicReply: listenerTopicReplyContext(data.message, isBotMentioned(larkAppId, data.message, undefined)),
+    },
   )) {
     return;
   }
@@ -24790,8 +24805,10 @@ async function handleThreadReplyAdmitted(
     const now = Date.now();
     // Bot-started handoff sessions have no human owner; keeping the bot as
     // owner makes daemon-generated footers wake that bot again.
-    const ownerOpenId = isForeignBot ? undefined : senderOId;
-    const ownerUnionId = isForeignBot ? undefined : senderUId;
+    const listenerTopicGuest = evaluateTalk(larkAppId, autoCreateChatId, senderOId, undefined, senderUId, autoCreateChatType,
+      listenerTopicReplyContext(data.message, isBotMentioned(larkAppId, data.message, undefined))).reason === 'listenerTopic';
+    const ownerOpenId = isForeignBot || listenerTopicGuest ? undefined : senderOId;
+    const ownerUnionId = isForeignBot || listenerTopicGuest ? undefined : senderUId;
     session.larkAppId = larkAppId;
     session.ownerOpenId = ownerOpenId;
     // creatorOpenId is the raw creating sender — set even for foreign-bot

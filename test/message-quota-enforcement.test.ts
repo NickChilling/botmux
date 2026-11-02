@@ -91,6 +91,8 @@ vi.mock('../src/services/team-groups-store.js', async () => {
   return { ...actual, isTeamGroupChat: (_dataDir: string, chatId?: string) => chatId === 'oc_team_group' };
 });
 
+import { config } from '../src/config.js';
+import { recordMessageListenerTopic } from '../src/services/message-listener-topic-access.js';
 import { registerBot, getBot } from '../src/bot-registry.js';
 import { parseSlashCommandInvocation } from '../src/core/command-handler.js';
 import {
@@ -641,6 +643,40 @@ describe("p2pMode='group' 建群前扣费点：命令判定必须早于扣费", 
         ...extra,
       }]);
     }
+
+    it.each([false, true])('rechecks listener-topic access and prompt hooks for botSender=%s', async botSender => {
+      const previousDir = config.session.dataDir;
+      config.session.dataDir = gateDir;
+      const bot = getBot('quota_app');
+      bot.config.globalMessageListener = { enabled: true, prompt: 'observe alerts' };
+      recordMessageListenerTopic(gateDir, 'quota_app', 'oc_1', 'om_listener');
+      const opts = { promptContent: 'continue', listenerTopicReply: { rootMessageId: 'om_listener', explicitlyMentioned: true } };
+      try {
+        installGate(`console.log(JSON.stringify({ decision: 'allow' }));`);
+        await expect(enforceMessageQuotaForCliInput(
+          'quota_app', 'oc_1', 'ou_external', 'om_followup', 'om_listener',
+          undefined, undefined, 'group', botSender, opts,
+        )).resolves.toBe(true);
+        await expect(enforceMessageQuotaForCliInput(
+          'quota_app', 'oc_1', 'ou_external', 'om_followup_other', 'om_other',
+          undefined, undefined, 'group', botSender, opts,
+        )).resolves.toBe(false);
+        installGate(`console.log(JSON.stringify({ decision: 'deny', reason: 'blocked by hook' }));`);
+        await expect(enforceMessageQuotaForCliInput(
+          'quota_app', 'oc_1', 'ou_external', 'om_followup_denied', 'om_listener',
+          undefined, undefined, 'group', botSender, opts,
+        )).resolves.toBe(false);
+        expect(mocks.beginCharge).not.toHaveBeenCalled();
+        bot.config.globalMessageListener.enabled = false;
+        await expect(enforceMessageQuotaForCliInput(
+          'quota_app', 'oc_1', 'ou_external', 'om_disabled', 'om_listener',
+          undefined, undefined, 'group', botSender, opts,
+        )).resolves.toBe(false);
+      } finally {
+        config.session.dataDir = previousDir;
+        bot.config.globalMessageListener = undefined;
+      }
+    });
 
     it('denies the message WITHOUT spending a quota unit', async () => {
       installGate(`console.log(JSON.stringify({ decision: 'deny', reason: 'nope' }));`);
